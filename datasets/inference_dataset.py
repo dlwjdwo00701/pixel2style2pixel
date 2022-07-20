@@ -7,6 +7,7 @@ class InferenceDataset(Dataset):
 
 	def __init__(self, root, opts, transform=None):
 		self.paths = sorted(data_utils.make_dataset(root))
+		self.paths.sort()
 		self.transform = transform
 		self.opts = opts
 

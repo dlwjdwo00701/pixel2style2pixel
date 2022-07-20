@@ -27,6 +27,7 @@ class TestOptions:
 		# arguments for super-resolution
 		self.parser.add_argument('--resize_factors', type=str, default=None,
 		                         help='Downsampling factor for super-res (should be a single value for inference).')
+		self.parser.add_argument('--MODE', type=str, default='cross', help='MODE cross or random')
 
 	def parse(self):
 		opts = self.parser.parse_args()

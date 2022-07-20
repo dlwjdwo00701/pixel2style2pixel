@@ -17,18 +17,12 @@ from utils.common import tensor2im, log_input_image
 from options.test_options import TestOptions
 from models.psp import pSp
 
+from deepface import DeepFace
+import pandas as pd
+import os
 
 def run():
 	test_opts = TestOptions().parse()
-
-	if test_opts.resize_factors is not None:
-		factors = test_opts.resize_factors.split(',')
-		assert len(factors) == 1, "When running inference, please provide a single downsampling factor!"
-		mixed_path_results = os.path.join(test_opts.exp_dir, 'style_mixing',
-		                                  'downsampling_{}'.format(test_opts.resize_factors))
-	else:
-		mixed_path_results = os.path.join(test_opts.exp_dir, 'style_mixing')
-	os.makedirs(mixed_path_results, exist_ok=True)
 
 	# update test options with options used during training
 	ckpt = torch.load(test_opts.checkpoint_path, map_location='cpu')
@@ -38,6 +32,7 @@ def run():
 		opts['learn_in_w'] = False
 	if 'output_size' not in opts:
 		opts['output_size'] = 1024
+
 	opts = Namespace(**opts)
 
 	net = pSp(opts)
@@ -45,57 +40,96 @@ def run():
 	net.cuda()
 
 	print('Loading dataset for {}'.format(opts.dataset_type))
+
 	dataset_args = data_configs.DATASETS[opts.dataset_type]
 	transforms_dict = dataset_args['transforms'](opts).get_transforms()
 	dataset = InferenceDataset(root=opts.data_path,
 	                           transform=transforms_dict['transform_inference'],
 	                           opts=opts)
-	dataloader = DataLoader(dataset,
-	                        batch_size=opts.test_batch_size,
-	                        shuffle=False,
-	                        num_workers=int(opts.test_workers),
-	                        drop_last=True)
 
-	latent_mask = [int(l) for l in opts.latent_mask.split(",")]
 	if opts.n_images is None:
 		opts.n_images = len(dataset)
 
-	global_i = 0
-	for input_batch in tqdm(dataloader):
-		if global_i >= opts.n_images:
-			break
-		with torch.no_grad():
-			input_batch = input_batch.cuda()
-			for image_idx, input_image in enumerate(input_batch):
-				# generate random vectors to inject into input image
-				vecs_to_inject = np.random.randn(opts.n_outputs_to_generate, 512).astype('float32')
-				multi_modal_outputs = []
-				for vec_to_inject in vecs_to_inject:
-					cur_vec = torch.from_numpy(vec_to_inject).unsqueeze(0).to("cuda")
-					# get latent vector to inject into our input image
-					_, latent_to_inject = net(cur_vec,
-					                          input_code=True,
-					                          return_latents=True)
-					# get output image with injected style vector
-					res = net(input_image.unsqueeze(0).to("cuda").float(),
-					          latent_mask=latent_mask,
-					          inject_latent=latent_to_inject,
-					          alpha=opts.mix_alpha,
-							  resize=opts.resize_outputs)
-					multi_modal_outputs.append(res[0])
+	if opts.MODE == 'random':
+		result_csv=pd.DataFrame()
+		mask = list(pd.read_csv('True_data.csv')['input'])
+		count=1
 
-				# visualize multi modal outputs
-				input_im_path = dataset.paths[global_i]
-				image = input_batch[image_idx]
-				input_image = log_input_image(image, opts)
-				resize_amount = (256, 256) if opts.resize_outputs else (opts.output_size, opts.output_size)
-				res = np.array(input_image.resize(resize_amount))
-				for output in multi_modal_outputs:
-					output = tensor2im(output)
-					res = np.concatenate([res, np.array(output.resize(resize_amount))], axis=1)
-				Image.fromarray(res).save(os.path.join(mixed_path_results, os.path.basename(input_im_path)))
-				global_i += 1
+		for j in range(100):
+			if int(dataset.paths[j].split('/')[1].split('.')[0]) in mask:
+				index = int(dataset.paths[j].split('/')[1].split('.')[0])
+			else:
+				continue
 
+			x_input = dataset[j].cuda()
+			x_input.unsqueeze_(0).to("cuda").float()
+
+			y_input = torch.from_numpy(np.random.randn(1,512).astype('float32')).to("cuda")
+			y_input = net(y_input, input_code=True)
+
+			latent_mask = [x for x in range(18)]
+
+			if not os.path.exists('/home/ljj/pixel2style2pixel/result/'+str(index)):
+				os.makedirs('/home/ljj/pixel2style2pixel/result/'+str(index))
+
+			for i in range(18):
+				del latent_mask[0]
+				res = net(x=x_input, y=y_input, latent_mask=latent_mask, resize=opts.resize_outputs, MODE=opts.MODE)
+				res = tensor2im(res.squeeze(0))
+				res.save('result/' + str(index) + '/' + str(i) + '.jpg')
+
+			result = []
+
+			for i in range(18):
+				result.append(DeepFace.verify(img1_path='/home/ljj/pixel2style2pixel/datas/'+str(index)+'.jpg', img2_path='/home/ljj/pixel2style2pixel/result/'+str(index)+'/'+str(i)+'.jpg',enforce_detection=False))
+
+			result_verified = []
+			result_distance = []
+
+			for i in range(18):
+				result_verified.append(str(result[i]['verified']))
+				result_distance.append(result[i]['distance'])
+
+			result = pd.DataFrame(data={'verified':result_verified,'distance':result_distance},index=[x for x in range(18)])
+			result.columns =[[str(index)+'image',str(index)+'image'],['verified','distance']]
+
+			if count==1:
+				result_csv = result
+				count = count + 1
+			else:
+				result_csv = pd.concat([result_csv, result],axis=1)
+
+		result_csv.to_csv('/home/ljj/pixel2style2pixel/result/verify.csv')
+
+
+	elif opts.MODE == 'cross':
+		x_input = dataset[0].cuda()
+		y_input = dataset[1].cuda()
+
+		x_input.unsqueeze_(0).to("cuda").float()
+		y_input.unsqueeze_(0).to("cuda").float()
+
+		latent_mask = []
+		for i in range(18):
+			latent_mask.append(i)
+			res = net(x=x_input, y=y_input, latent_mask=latent_mask, resize=opts.resize_outputs, MODE=opts.MODE)
+			res = tensor2im(res.squeeze(0))
+			res.save('result/result'+str(i)+'.jpg')
+
+		latent_mask = []
+		for i in range(18):
+			latent_mask.append(i)
+			res = net(x=y_input, y=x_input, latent_mask=latent_mask, resize=opts.resize_outputs, MODE=opts.MODE)
+			res = tensor2im(res.squeeze(0))
+			res.save('result/result_reverse' + str(i) + '.jpg')
+
+	elif opts.MODE == 'encoding':
+		for i in range(len(dataset)):
+			x_input = dataset[i].cuda()
+			x_input.unsqueeze_(0).to("cuda").float()
+			res = net(x=x_input, resize=opts.resize_outputs, MODE=opts.MODE)
+			res = tensor2im(res.squeeze(0))
+			res.save('encoding/'+dataset.paths[i].split('/')[1].split('.')[0]+'.jpg')
 
 if __name__ == '__main__':
 	run()

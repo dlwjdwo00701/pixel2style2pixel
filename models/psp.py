@@ -66,29 +66,48 @@ class pSp(nn.Module):
 			else:
 				self.__load_latent_avg(ckpt, repeat=self.opts.n_styles)
 
-	def forward(self, x, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
-	            inject_latent=None, return_latents=False, alpha=None):
+	def forward(self, x=None, y=None, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
+	            return_latents=False, MODE='cross'):
 		if input_code:
-			codes = x
+			_, result = self.decoder([x], input_is_latent=False, randomize_noise=True, return_latents=True)
+			return result
+
 		else:
 			codes = self.encoder(x)
+			if MODE=='random':
+				codes_ = y
+
+			elif MODE=='encoding':
+				if self.opts.start_from_latent_avg:
+					if self.opts.learn_in_w:
+						codes = codes + self.latent_avg.repeat(codes.shape[0], 1)
+					else:
+						codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)
+
+				input_is_latent = not input_code
+				images, result_latent = self.decoder([codes],
+													 input_is_latent=input_is_latent,
+													 randomize_noise=randomize_noise,
+													 return_latents=return_latents)
+				if resize:
+					images = self.face_pool(images)
+				return images
+
+			elif MODE=='cross':
+				codes_ = self.encoder(y)
+
 			# normalize with respect to the center of an average face
 			if self.opts.start_from_latent_avg:
 				if self.opts.learn_in_w:
 					codes = codes + self.latent_avg.repeat(codes.shape[0], 1)
+					codes_ = codes_ + self.latent_avg.repeat(codes_.shape[0], 1)
 				else:
 					codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)
-
+					codes_ = codes_ + self.latent_avg.repeat(codes_.shape[0], 1, 1)
 
 		if latent_mask is not None:
 			for i in latent_mask:
-				if inject_latent is not None:
-					if alpha is not None:
-						codes[:, i] = alpha * inject_latent[:, i] + (1 - alpha) * codes[:, i]
-					else:
-						codes[:, i] = inject_latent[:, i]
-				else:
-					codes[:, i] = 0
+				codes[:, i] = codes_[:, i]
 
 		input_is_latent = not input_code
 		images, result_latent = self.decoder([codes],
